@@ -112,12 +112,14 @@ String gUTF8Map = "";
 uint8_t *g_customFontData = nullptr;
 uint16_t *g_customFontMap = nullptr;
 // / Thêm biến toàn cục để lưu version
-String currentVersion = "1.0.0"; // Version mặc định
+// String currentVersion = "1.0.0"; // Version mặc định
 // Hàm callback vẽ pixel trên LED Matrix
 void setpx(int16_t x, int16_t y, uint16_t color)
 {
-  if (dma_display != nullptr)
+  if (dma_display != nullptr && x >= 0 && x < panelWidth && y >= 0 && y < PANEL_RES_Y)
+  {
     dma_display->drawPixel(x, y, color);
+  }
 }
 MakeFont myfont(&setpx); // hàm callback setpx được định nghĩa bên dưới
 String generateFirmwareHash(const uint8_t *data, size_t len)
@@ -307,7 +309,7 @@ void loadFontFromSPIFFS()
     String jsonData = fontFile.readString();
     fontFile.close();
 
-    DynamicJsonDocument doc(16384);
+    DynamicJsonDocument doc(100000);
     DeserializationError error = deserializeJson(doc, jsonData);
     if (error)
     {
@@ -477,7 +479,7 @@ uint32_t getChipID()
 
 // Nhúng danh sách Chip ID hợp lệ vào section đặc biệt trong firmware
 const char *validChipIDsJson = "CHIPID_MARKER:[2021749, 2021748, 1234567]";
-const char *versionString = "VERSION_MARKER:1.0.9"; // Nhúng version tĩnh
+const char *versionString = "VERSION_MARKER:1.0.0"; // Nhúng version tĩnh
 
 bool isValidDevice()
 {
@@ -523,26 +525,23 @@ bool isValidDevice()
   return false;
 }
 
-// Trong hàm saveVersionToSPIFFS
 void saveVersionToSPIFFS(const String &firmwareHash)
 {
   File versionFile = SPIFFS.open("/version.json", FILE_WRITE);
   if (versionFile)
   {
     DynamicJsonDocument doc(512);
-    doc["version"] = currentVersion;
-    doc["firmware_hash"] = firmwareHash; // Thêm hash của firmware
+    doc["firmware_hash"] = firmwareHash; // Chỉ lưu hash
     serializeJson(doc, versionFile);
     versionFile.close();
-    Serial.println("Version saved to SPIFFS: " + currentVersion + " with hash: " + firmwareHash);
+    Serial.println("Firmware hash saved to SPIFFS: " + firmwareHash);
   }
   else
   {
-    Serial.println("Failed to save version to SPIFFS!");
+    Serial.println("Failed to save to SPIFFS!");
   }
 }
 
-// Trong hàm loadVersionFromSPIFFS
 String loadFirmwareHashFromSPIFFS()
 {
   String firmwareHash = "";
@@ -554,11 +553,10 @@ String loadFirmwareHashFromSPIFFS()
 
     DynamicJsonDocument doc(512);
     DeserializationError error = deserializeJson(doc, jsonData);
-    if (!error && doc.containsKey("version") && doc.containsKey("firmware_hash"))
+    if (!error && doc.containsKey("firmware_hash"))
     {
-      currentVersion = doc["version"].as<String>();
       firmwareHash = doc["firmware_hash"].as<String>();
-      Serial.println("Loaded version: " + currentVersion + " with hash: " + firmwareHash);
+      Serial.println("Loaded firmware hash: " + firmwareHash);
     }
     else
     {
@@ -572,14 +570,6 @@ String loadFirmwareHashFromSPIFFS()
   return firmwareHash;
 }
 
-void incrementVersion()
-{
-  int major = 0, minor = 0, patch = 0;
-  sscanf(currentVersion.c_str(), "%d.%d.%d", &major, &minor, &patch);
-  patch++; // Chỉ tăng patch
-  currentVersion = String(major) + "." + String(minor) + "." + String(patch);
-  Serial.println("Incremented version to: " + currentVersion);
-}
 // Task khởi tạo Ethernet
 void EthTaskCode(void *pvParameters)
 {
@@ -672,180 +662,184 @@ void setupServerEndpoints()
 {
   server.on("/chipid", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-        Serial.println("Received request to /chipid at: " + String(millis()) + "ms");
-        DynamicJsonDocument doc(256);
-        uint32_t chipId = getChipID();
-        doc["chip_id"] = chipId;
-        String response;
-        serializeJson(doc, response);
-        Serial.print("Response sent to /chipid: ");
-        Serial.println(response);
-        request->send(200, "application/json", response); });
+    Serial.println("Received request to /chipid at: " + String(millis()) + "ms");
+    DynamicJsonDocument doc(256);
+    uint32_t chipId = getChipID();
+    doc["chip_id"] = chipId;
+    String response;
+    serializeJson(doc, response);
+    Serial.print("Response sent to /chipid: ");
+    Serial.println(response);
+    request->send(200, "application/json", response); });
 
   server.on("/version", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-        DynamicJsonDocument doc(256);
-        doc["version"] = currentVersion; // Trả về version hiện tại của thiết bị
-        String response;
-        serializeJson(doc, response);
-        request->send(200, "application/json", response); });
+    DynamicJsonDocument doc(256);
+    String version = String(versionString).substring(String("VERSION_MARKER:").length()); // Lấy "1.0.9" từ "VERSION_MARKER:1.0.9"
+    doc["version"] = version;
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response); });
 
   server.on("/update", HTTP_POST, [](AsyncWebServerRequest *request)
             {
-      if (!isValidDevice()) {
-        request->send(403, "text/plain", "Invalid device! OTA update denied.");
-        return;
-      } }, [](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final)
+    if (!isValidDevice()) {
+      request->send(403, "text/plain", "Invalid device! OTA update denied.");
+      return;
+    } }, [](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final)
             {
-      static MD5Builder md5; // Dùng để tính hash toàn bộ dữ liệu
-      static String newFirmwareHash = "";
-      static String oldFirmwareHash = loadFirmwareHashFromSPIFFS();
+    static MD5Builder md5; // Dùng để tính hash toàn bộ dữ liệu
+    static String newFirmwareHash = "";
+    static String oldFirmwareHash = loadFirmwareHashFromSPIFFS();
 
-      if (!isValidDevice()) return;
+    if (!isValidDevice()) return;
 
-      if (!index) {
-        Serial.printf("OTA Update Start: %s\n", filename.c_str());
-        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
-          Update.printError(Serial);
-          request->send(500, "text/plain", "OTA could not begin");
-          return;
-        }
-        md5.begin(); // Khởi tạo MD5 cho toàn bộ dữ liệu
+    if (!index) {
+      Serial.printf("OTA Update Start: %s\n", filename.c_str());
+      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+        Update.printError(Serial);
+        request->send(500, "text/plain", "OTA could not begin");
+        return;
       }
+      md5.begin(); // Khởi tạo MD5 cho toàn bộ dữ liệu
+    }
 
-      if (len) {
-        if (Update.write(data, len) != len) {
-          Update.printError(Serial);
-          request->send(500, "text/plain", "OTA write failed");
-          return;
-        }
-        md5.add(data, len); // Thêm từng khối dữ liệu vào MD5
+    if (len) {
+      if (Update.write(data, len) != len) {
+        Update.printError(Serial);
+        request->send(500, "text/plain", "OTA write failed");
+        return;
       }
+      md5.add(data, len); // Thêm từng khối dữ liệu vào MD5
+    }
 
-      if (final) {
-        if (Update.end(true)) {
-          md5.calculate(); // Tính hash trên toàn bộ dữ liệu
-          newFirmwareHash = md5.toString();
-          Serial.printf("OTA Update Success: %u bytes, Hash: %s\n", index + len, newFirmwareHash.c_str());
-          Serial.println("Old Hash: " + oldFirmwareHash);
+    if (final) {
+      if (Update.end(true)) {
+        md5.calculate(); // Tính hash trên toàn bộ dữ liệu
+        newFirmwareHash = md5.toString();
+        Serial.printf("OTA Update Success: %u bytes, Hash: %s\n", index + len, newFirmwareHash.c_str());
+        Serial.println("Old Hash: " + oldFirmwareHash);
 
-          if (newFirmwareHash == oldFirmwareHash) {
-            Serial.println("Firmware unchanged, keeping version: " + currentVersion);
-          } else {
-            bool foundInHistory = false;
-            if (SPIFFS.exists("/version_history.json")) {
-              File historyFile = SPIFFS.open("/version_history.json", "r");
-              if (historyFile) {
-                DynamicJsonDocument doc(2048);
-                DeserializationError error = deserializeJson(doc, historyFile);
-                if (!error) {
-                  for (JsonPair kv : doc.as<JsonObject>()) {
-                    if (kv.value()["hash"] == newFirmwareHash) {
-                      currentVersion = kv.key().c_str();
-                      Serial.println("Restoring old version from history: " + currentVersion);
-                      foundInHistory = true;
-                      break;
-                    }
-                  }
-                  if (!foundInHistory) {
-                    Serial.println("New firmware detected (not in history), incrementing version");
-                    incrementVersion();
-                    saveVersionToHistory(currentVersion, newFirmwareHash);
-                  }
-                } else {
-                  Serial.println("Failed to parse version history: " + String(error.c_str()));
-                }
-                historyFile.close();
-              } else {
-                Serial.println("Failed to open version_history.json!");
-              }
-            } else {
-              Serial.println("No version history found, treating as new firmware");
-              incrementVersion();
-              saveVersionToHistory(currentVersion, newFirmwareHash);
-            }
-            saveVersionToSPIFFS(newFirmwareHash);
-          }
-          request->send(200, "text/plain", "OK");
-          delay(1000);
-          ESP.restart();
-        } else {
-          Update.printError(Serial);
-          request->send(500, "text/plain", "OTA update failed");
-        }
-      } });
+        // Không tăng version, chỉ lưu hash nếu cần
+        saveVersionToSPIFFS(newFirmwareHash);
+
+        request->send(200, "text/plain", "OK");
+        delay(1000);
+        ESP.restart();
+      } else {
+        Update.printError(Serial);
+        request->send(500, "text/plain", "OTA update failed");
+      }
+    } });
+
+  server.on("/updateVersion", HTTP_POST, [](AsyncWebServerRequest *request)
+            {
+              request->send(403, "application/json", "{\"error\":\"Version update not allowed\"}"); // Không cho phép cập nhật version
+            });
 
   server.on("/upload", HTTP_POST, [](AsyncWebServerRequest *request)
             {
-Serial.println("Received POST request on /upload");
-Serial.println("Content-Length: " + String(request->contentLength()));
-Serial.println("Has param 'plain': " + String(request->hasParam("plain", true)));
-
-if (!request->hasParam("plain", true)) {
-  Serial.println("No 'plain' parameter found in request");
-  request->send(400, "application/json", "{\"error\":\"Empty JSON\"}");
-  return;
-}
-
-String jsonData = request->getParam("plain", true)->value();
-Serial.println("Received JSON (first 500 chars):");
-Serial.println(jsonData.substring(0, 500)); // Chỉ in 500 ký tự đầu tiên để tránh tràn Serial
-
-DynamicJsonDocument doc(50000);
-DeserializationError error = deserializeJson(doc, jsonData);
-if (error) {
-  Serial.print("JSON parse error: ");
-  Serial.println(error.f_str());
-  request->send(400, "application/json", "{\"status\":\"error\",\"message\":\"JSON parse error\"}");
-  return;
-}
-
-if (doc.is<JsonObject>() && doc.size() == 1) {
-  for (JsonPair kv : doc.as<JsonObject>()) {
-      String fontName = kv.key().c_str();
-      JsonObject fontObj = kv.value().as<JsonObject>();
-      gFontName = fontName;
-
-      JsonArray fontDataArray = fontObj["font_name"];
-      JsonArray fontMapArray = fontObj["font_map"];
-
-      if (!fontDataArray || !fontMapArray) {
-          Serial.println("Font data format error.");
-          request->send(400, "application/json", "{\"status\":\"error\",\"message\":\"Missing font_name or font_map\"}");
-          return;
-      }
-
-      if (g_customFontData != nullptr) delete[] g_customFontData;
-      if (g_customFontMap != nullptr) delete[] g_customFontMap;
-
-      int dataSize = fontDataArray.size();
-      g_customFontData = new uint8_t[dataSize];
-      for (int i = 0; i < dataSize; i++) {
-          g_customFontData[i] = fontDataArray[i];
-      }
-
-      int mapSize = fontMapArray.size();
-      g_customFontMap = new uint16_t[mapSize];
-      for (int i = 0; i < mapSize; i++) {
-          g_customFontMap[i] = fontMapArray[i];
-      }
-
-      MyFont_typedef customFont = {g_customFontData, g_customFontMap};
-      myfont.set_font(customFont);
-
-      File fontFile = SPIFFS.open("/font.json", FILE_WRITE);
-      if (fontFile) {
-          fontFile.print(jsonData);
-          fontFile.close();
-          Serial.println("JSON saved to SPIFFS.");
-      }
-
-      Serial.println("Custom font updated successfully.");
-      request->send(200, "application/json", "{\"status\":\"ok\"}");
-  }
-} else {
-  request->send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid JSON format\"}");
-} });
+              Serial.println("Received POST request on /upload");
+              if (!request->hasParam("plain", true)) {
+                  Serial.println("No 'plain' parameter found in request");
+                  request->send(400, "application/json", "{\"error\":\"Empty JSON\"}");
+                  return;
+              }
+          
+              String jsonData = request->getParam("plain", true)->value();
+              DynamicJsonDocument doc(150000);
+              DeserializationError error = deserializeJson(doc, jsonData);
+              if (error) {
+                  Serial.print("JSON parse error: ");
+                  Serial.println(error.f_str());
+                  request->send(400, "application/json", "{\"status\":\"error\",\"message\":\"JSON parse error\"}");
+                  return;
+              }
+          
+              if (doc.is<JsonObject>() && doc.size() == 1) {
+                  for (JsonPair kv : doc.as<JsonObject>()) {
+                      String fontName = kv.key().c_str();
+                      JsonObject fontObj = kv.value().as<JsonObject>();
+                      gFontName = fontName;
+          
+                      JsonArray fontDataArray = fontObj["font_name"];
+                      JsonArray fontMapArray = fontObj["font_map"];
+          
+                      if (!fontDataArray || !fontMapArray) {
+                          Serial.println("Font data format error.");
+                          request->send(400, "application/json", "{\"status\":\"error\",\"message\":\"Missing font_name or font_map\"}");
+                          return;
+                      }
+          
+                      int dataSize = fontDataArray.size();
+                      int mapSize = fontMapArray.size();
+                      size_t requiredMemory = dataSize * sizeof(uint8_t) + mapSize * sizeof(uint16_t);
+                      size_t freeHeap = ESP.getFreeHeap();
+          
+                      // Kiểm tra xem bộ nhớ cần thiết có vượt quá 80% heap còn lại không
+                      if (requiredMemory > freeHeap * 0.8) {
+                          Serial.println("Not enough memory for font data: Required " + String(requiredMemory) + ", Free " + String(freeHeap));
+                          request->send(413, "application/json", "{\"error\":\"Not enough memory\"}");
+                          return;
+                      }
+          
+                      // Giải phóng bộ nhớ cũ nếu có
+                      if (g_customFontData != nullptr) delete[] g_customFontData;
+                      if (g_customFontMap != nullptr) delete[] g_customFontMap;
+          
+                      // Cấp phát bộ nhớ cho font data
+                      g_customFontData = new uint8_t[dataSize];
+                      if (g_customFontData == nullptr) {
+                          Serial.println("Failed to allocate memory for font data");
+                          request->send(500, "application/json", "{\"error\":\"Memory allocation failed\"}");
+                          return;
+                      }
+          
+                      // Cấp phát bộ nhớ cho font map
+                      g_customFontMap = new uint16_t[mapSize];
+                      if (g_customFontMap == nullptr) {
+                          Serial.println("Failed to allocate memory for font map");
+                          delete[] g_customFontData; // Dọn dẹp bộ nhớ đã cấp phát
+                          g_customFontData = nullptr;
+                          request->send(500, "application/json", "{\"error\":\"Memory allocation failed\"}");
+                          return;
+                      }
+          
+                      // Sao chép dữ liệu từ JSON vào mảng
+                      for (int i = 0; i < dataSize; i++) {
+                          g_customFontData[i] = fontDataArray[i];
+                      }
+                      for (int i = 0; i < mapSize; i++) {
+                          g_customFontMap[i] = fontMapArray[i];
+                      }
+          
+                      // Cập nhật font
+                      MyFont_typedef customFont = {g_customFontData, g_customFontMap};
+                      myfont.set_font(customFont);
+          
+                      // Lưu JSON vào SPIFFS
+                      File fontFile = SPIFFS.open("/font.json", FILE_WRITE);
+                      if (fontFile) {
+                          fontFile.print(jsonData);
+                          fontFile.close();
+                          Serial.println("JSON saved to SPIFFS.");
+                      }
+          
+                      Serial.println("Custom font updated successfully.");
+                      request->send(200, "application/json", "{\"status\":\"ok\"}");
+                      // Thêm đoạn này để làm mới hiển thị
+                      if (dma_display) { // Kiểm tra xem màn hình LED có sẵn không
+                        dma_display->clearScreen(); // Xóa toàn bộ màn hình LED
+                        myfont.print(textX1, textY1, (unsigned char *)mainTextLine1.c_str(), colorLine1, dma_display->color565(0, 0, 0));
+                        // Nếu hiển thị 2 dòng, vẽ thêm dòng thứ 2
+                        if (displayMode == 1) {
+                            myfont.print(textX2, textY2, (unsigned char *)mainTextLine2.c_str(), colorLine2, dma_display->color565(0, 0, 0));
+                        }
+                      }
+                  }
+              } else {
+                  request->send(400, "application/json", "{\"status\":\"error\",\"message\":\"Invalid JSON format\"}");
+              } });
   server.on("/setText", HTTP_POST, [](AsyncWebServerRequest *request)
             {
     Serial.println("Received POST request on /setText");
@@ -1015,14 +1009,6 @@ if (doc.is<JsonObject>() && doc.size() == 1) {
         }
     
         request->send(200, "application/json", "{\"status\":\"ok\"}"); });
-
-  server.on("/version", HTTP_GET, [](AsyncWebServerRequest *request)
-            {
-      DynamicJsonDocument doc(256);
-      doc["version"] = currentVersion;
-      String response;
-      serializeJson(doc, response);
-      request->send(200, "application/json", response); });
 }
 
 void saveConfigToSPIFFS()
@@ -1096,13 +1082,7 @@ void loadConfigFromSPIFFS()
     rotation = doc["rotation"] | 0;
     alignment = doc["alignment"] | 1;
     useDHCP = (doc["networkMode"] | 0) == 0;
-    staticIP = doc["staticIP"] | "192.168.1.100";
-    gateway = doc["gateway"] | "192.168.1.1";
-    subnet = doc["subnet"] | "255.255.255.0";
     serverPort = doc["port"] | 80;
-    enableHeartbeat = (doc["heartbeat"] | 0) == 1;
-    heartbeatInterval = (doc["heartbeatInterval"] | 10) * 1000;
-    heartbeatServer = doc["heartbeatServer"] | "192.168.1.10";
     displayMode = doc["displayMode"] | 1; // Mặc định 2 dòng
 
     dma_display->setBrightness8(brightness);
@@ -1133,7 +1113,7 @@ void setup(void)
       return;
     }
     dma_display->setBrightness8(brightnessText);
-    colorLine1 = dma_display->color565(255, 0, 255); // Cập nhật sau khi dma_display sẵn sàng
+    colorLine1 = dma_display->color565(255, 0, 255);
     colorLine2 = dma_display->color565(255, 0, 0);
     myfont.set_font(HUYDZZ);
     loadFontFromSPIFFS();
@@ -1143,7 +1123,7 @@ void setup(void)
 
   xTaskCreatePinnedToCore(EthTaskCode, "EthTask", 20000, NULL, 1, NULL, 1);
 
-  loadFirmwareHashFromSPIFFS();
+  loadFirmwareHashFromSPIFFS(); // Chỉ tải hash
   setupServerEndpoints();
   server.begin();
   if (enableHeartbeat)
@@ -1194,7 +1174,7 @@ void loop()
   if (!ipDisplayed && flag_connect_eth)
   {
     dma_display->clearScreen();
-    String ipDisplay = "IP: " + ipStr;
+    String ipDisplay = "" + ipStr;
     myfont.print(5, 6, (unsigned char *)ipDisplay.c_str(), dma_display->color565(255, 255, 255), dma_display->color565(0, 0, 0));
     delay(5000);
     ipDisplayed = true;
